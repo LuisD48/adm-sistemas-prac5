@@ -1,6 +1,6 @@
 # Practica 5 - Servidor FTP
 **Alumno:** Laurean Acosta Luis Donaldo  
-**Carrera:** Administracion de Sistemas  
+**Materia:** Administracion de Sistemas  
 
 ---
 
