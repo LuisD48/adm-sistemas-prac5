@@ -1,28 +1,27 @@
 #!/bin/bash
 # =============================================================
 #  lib/funciones_ftp.sh
-#  Gestión completa de vsftpd en OpenSUSE
-#  Práctica 5 - Servidor FTP
+#  Gestion completa de vsftpd en OpenSUSE
+#  Practica 5 - Servidor FTP
 # =============================================================
 
 source "$(dirname "$0")/lib/funciones_comunes.sh"
 
-# ── Variables globales ────────────────────────────────────────
+# Variables globales
 FTP_ROOT="/srv/ftp"
-FTP_GENERAL="${FTP_ROOT}/general"
-FTP_REPROBADOS="${FTP_ROOT}/reprobados"
-FTP_RECURSADORES="${FTP_ROOT}/recursadores"
+FTP_GENERAL="${FTP_ROOT}/_general"
+FTP_REPROBADOS="${FTP_ROOT}/_reprobados"
+FTP_RECURSADORES="${FTP_ROOT}/_recursadores"
 VSFTPD_CONF="/etc/vsftpd.conf"
 GRUPOS=("reprobados" "recursadores")
 
-# ── Opción 1: Instalación idempotente ────────────────────────
+# ── Opcion 1: Instalacion idempotente ─────────────────────────
 ftp_instalar() {
     separador
-    log_info "Verificando instalación de vsftpd..."
-
+    log_info "Verificando instalacion de vsftpd..."
     instalar_paquete "vsftpd" || return
 
-    # Crear grupos si no existen
+    # Crear grupos
     for grupo in "${GRUPOS[@]}"; do
         if ! getent group "$grupo" &>/dev/null; then
             groupadd "$grupo"
@@ -32,28 +31,29 @@ ftp_instalar() {
         fi
     done
 
-    # Crear estructura de directorios
-    log_info "Creando estructura de directorios FTP..."
+    # Crear carpetas compartidas base
     mkdir -p "$FTP_GENERAL" "$FTP_REPROBADOS" "$FTP_RECURSADORES"
+    chown root:root "$FTP_GENERAL";        chmod 777 "$FTP_GENERAL"
+    chown root:reprobados "$FTP_REPROBADOS";   chmod 775 "$FTP_REPROBADOS"
+    chown root:recursadores "$FTP_RECURSADORES"; chmod 775 "$FTP_RECURSADORES"
 
-    # Permisos base
-    chown root:root "$FTP_ROOT"
-    chmod 755 "$FTP_ROOT"
+    log_ok "Carpetas compartidas:"
+    log_ok "  ${FTP_GENERAL}      -> lectura anonima + escritura autenticados"
+    log_ok "  ${FTP_REPROBADOS}   -> escritura grupo reprobados"
+    log_ok "  ${FTP_RECURSADORES} -> escritura grupo recursadores"
 
-    # /general — todos pueden leer, usuarios autenticados escribir
-    chown root:root "$FTP_GENERAL"
-    chmod 777 "$FTP_GENERAL"
+    # Agregar /bin/false a shells permitidas
+    grep -q "^/bin/false$" /etc/shells || echo "/bin/false" >> /etc/shells
+    log_ok "/bin/false agregado a /etc/shells"
 
-    # Carpetas de grupo
-    chown root:reprobados "$FTP_REPROBADOS"
-    chmod 775 "$FTP_REPROBADOS"
-    chown root:recursadores "$FTP_RECURSADORES"
-    chmod 775 "$FTP_RECURSADORES"
-
-    log_ok "Estructura creada:"
-    log_ok "  ${FTP_ROOT}/general      → lectura anónima + escritura autenticados"
-    log_ok "  ${FTP_ROOT}/reprobados   → escritura grupo reprobados"
-    log_ok "  ${FTP_ROOT}/recursadores → escritura grupo recursadores"
+    # Crear archivo PAM
+    mkdir -p /etc/pam.d
+    cat > /etc/pam.d/ftp << 'EOF'
+auth required pam_unix.so
+account required pam_unix.so
+session required pam_unix.so
+EOF
+    log_ok "Archivo PAM /etc/pam.d/ftp creado."
 
     # Generar vsftpd.conf
     ftp_configurar_vsftpd
@@ -61,58 +61,53 @@ ftp_instalar() {
     # Habilitar e iniciar
     systemctl enable vsftpd &>/dev/null
     systemctl restart vsftpd
-    if systemctl is-active --quiet vsftpd; then
-        log_ok "Servicio vsftpd activo."
-    else
+    systemctl is-active --quiet vsftpd && log_ok "Servicio vsftpd activo." || {
         log_error "Error al iniciar vsftpd."
         journalctl -u vsftpd --no-pager | tail -5
-    fi
+    }
 
     # Firewall
-    if command -v firewall-cmd &>/dev/null; then
+    command -v firewall-cmd &>/dev/null && {
         firewall-cmd --add-service=ftp --permanent &>/dev/null
+        firewall-cmd --add-port=40000-50000/tcp --permanent &>/dev/null
         firewall-cmd --reload &>/dev/null
-        log_ok "Puerto 21 abierto en firewall."
-    fi
+        log_ok "Puerto 21 y pasivos abiertos en firewall."
+    }
 }
 
 # ── Generar vsftpd.conf ───────────────────────────────────────
 ftp_configurar_vsftpd() {
-    log_info "Generando configuración vsftpd..."
-    cat > "$VSFTPD_CONF" <<'EOF'
-# =============================================================
-#  vsftpd.conf — Práctica 5 Administración de Sistemas
-# =============================================================
-
-# ── Acceso anónimo (solo lectura a /general) ──────────────────
+    log_info "Generando vsftpd.conf..."
+    cat > "$VSFTPD_CONF" << 'EOF'
+# Acceso anonimo (solo lectura a _general)
 anonymous_enable=YES
-anon_root=/srv/ftp
+anon_root=/srv/ftp/_general
 no_anon_password=YES
 anon_upload_enable=NO
 anon_mkdir_write_enable=NO
 anon_other_write_enable=NO
 
-# ── Usuarios locales ──────────────────────────────────────────
+# Usuarios locales
 local_enable=YES
 write_enable=YES
 local_umask=022
-chroot_local_user=YES
-allow_writeable_chroot=YES
 
-# ── Configuración general ─────────────────────────────────────
+# Chroot - cada usuario ve solo su directorio home
+chroot_local_user=YES
+allow_writeable_chroot=NO
+passwd_chroot_enable=YES
+
+# General
 dirmessage_enable=YES
 xferlog_enable=YES
 connect_from_port_20=YES
-xferlog_std_format=YES
 listen=YES
 listen_ipv6=NO
-
-# ── Seguridad ─────────────────────────────────────────────────
-ftpd_banner=Bienvenido al Servidor FTP - Administración de Sistemas
+ftpd_banner=Bienvenido al Servidor FTP - Administracion de Sistemas
 userlist_enable=NO
 tcp_wrappers=NO
 
-# ── Modo pasivo ───────────────────────────────────────────────
+# Modo pasivo
 pasv_enable=YES
 pasv_min_port=40000
 pasv_max_port=50000
@@ -120,170 +115,155 @@ EOF
     log_ok "vsftpd.conf generado."
 }
 
-# ── Opción 2: Gestión de usuarios ────────────────────────────
+# ── Crear usuario con estructura chroot ───────────────────────
+ftp_crear_usuario() {
+    local usuario="$1"
+    local pass="$2"
+    local grupo="$3"
+
+    # Crear usuario del sistema
+    if ! id "$usuario" &>/dev/null; then
+        useradd -M -s /bin/false "$usuario"
+    fi
+
+    # Asignar grupo
+    usermod -g "$grupo" -G "$grupo" "$usuario"
+
+    # Establecer contrasena
+    echo "${usuario}:${pass}" | chpasswd
+
+    # Estructura chroot:
+    # /srv/ftp/<usuario>/           <- chroot root (root:root 755)
+    # /srv/ftp/<usuario>/general/   <- enlace a _general
+    # /srv/ftp/<usuario>/<grupo>/   <- enlace a _<grupo>
+    # /srv/ftp/<usuario>/<usuario>/ <- carpeta personal
+
+    local USER_CHROOT="${FTP_ROOT}/${usuario}"
+
+    mkdir -p "${USER_CHROOT}/${usuario}"
+    chown root:root "${USER_CHROOT}"
+    chmod 755 "${USER_CHROOT}"
+
+    # Enlazar carpeta general
+    [[ ! -e "${USER_CHROOT}/general" ]] && \
+        ln -sfn "${FTP_GENERAL}" "${USER_CHROOT}/general"
+
+    # Enlazar carpeta de grupo
+    [[ ! -e "${USER_CHROOT}/${grupo}" ]] && \
+        ln -sfn "${FTP_ROOT}/_${grupo}" "${USER_CHROOT}/${grupo}"
+
+    # Carpeta personal
+    chown "${usuario}:${grupo}" "${USER_CHROOT}/${usuario}"
+    chmod 700 "${USER_CHROOT}/${usuario}"
+    echo "Bienvenido ${usuario} - grupo ${grupo}" > "${USER_CHROOT}/${usuario}/bienvenida.txt"
+    chown "${usuario}:${grupo}" "${USER_CHROOT}/${usuario}/bienvenida.txt"
+
+    # Cambiar home del usuario a su chroot
+    usermod -d "${USER_CHROOT}" "$usuario"
+
+    log_ok "Usuario '${usuario}' creado -> grupo: ${grupo}"
+    log_ok "  Al conectarse vera: /general, /${grupo}, /${usuario}"
+}
+
+# ── Opcion 2: Gestion de usuarios ────────────────────────────
 ftp_gestionar_usuarios() {
     separador
-    echo -e "${BOLD}── Gestión de Usuarios FTP ────────────────────────${NC}"
-
-    echo -ne "¿Cuántos usuarios deseas crear? "; read -r N
+    echo -e "${BOLD}-- Gestion de Usuarios FTP --------------------------${NC}"
+    echo -ne "Cuantos usuarios deseas crear? "; read -r N
     if ! [[ "$N" =~ ^[0-9]+$ ]] || (( N < 1 )); then
-        log_error "Número inválido."; return
+        log_error "Numero invalido."; return
     fi
 
     for (( i=1; i<=N; i++ )); do
         echo ""
-        echo -e "${CYAN}── Usuario $i de $N ─────────────────────────────────${NC}"
+        echo -e "${CYAN}-- Usuario $i de $N --${NC}"
 
-        # Nombre de usuario
         local usuario
         while true; do
             echo -ne "   > Nombre de usuario: "; read -r usuario
-            if [[ -z "$usuario" ]]; then
-                log_error "El nombre no puede estar vacío."; continue
-            fi
-            if id "$usuario" &>/dev/null; then
-                log_warn "Usuario '$usuario' ya existe. ¿Sobreescribir? (s/n)"
-                read -r RESP
-                [[ "$RESP" =~ ^[Ss]$ ]] && break || continue
-            fi
+            [[ -z "$usuario" ]] && { log_error "No puede estar vacio."; continue; }
             break
         done
 
-        # Contraseña
-        local pass
+        local pass pass2
         while true; do
-            echo -ne "   > Contraseña: "; read -rs pass; echo
-            [[ -z "$pass" ]] && { log_error "La contraseña no puede estar vacía."; continue; }
-            echo -ne "   > Confirmar contraseña: "; read -rs pass2; echo
-            [[ "$pass" != "$pass2" ]] && { log_error "Las contraseñas no coinciden."; continue; }
+            echo -ne "   > Contrasena: "; read -rs pass; echo
+            [[ -z "$pass" ]] && { log_error "No puede estar vacia."; continue; }
+            echo -ne "   > Confirmar contrasena: "; read -rs pass2; echo
+            [[ "$pass" != "$pass2" ]] && { log_error "No coinciden."; continue; }
             break
         done
 
-        # Grupo
         local grupo
         while true; do
-            echo -e "   > Grupo: ${BOLD}[1]${NC} reprobados  ${BOLD}[2]${NC} recursadores"
-            echo -ne "   Selecciona [1-2]: "; read -r GSEL
-            case $GSEL in
-                1) grupo="reprobados"; break ;;
-                2) grupo="recursadores"; break ;;
-                *) log_error "Opción inválida." ;;
-            esac
+            echo -ne "   > Grupo (reprobados / recursadores): "; read -r grupo
+            grupo=$(echo "$grupo" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+            [[ "$grupo" == "reprobados" || "$grupo" == "recursadores" ]] && break
+            log_error "Grupo invalido. Escribe 'reprobados' o 'recursadores'."
         done
 
         ftp_crear_usuario "$usuario" "$pass" "$grupo"
     done
 }
 
-# ── Crear usuario con estructura de carpetas ──────────────────
-ftp_crear_usuario() {
-    local usuario="$1"
-    local pass="$2"
-    local grupo="$3"
-
-    # Crear usuario del sistema si no existe
-    if ! id "$usuario" &>/dev/null; then
-        useradd -M -s /bin/false -G "$grupo" "$usuario"
-    else
-        usermod -G "$grupo" "$usuario"
-    fi
-
-    # Establecer contraseña
-    echo "${usuario}:${pass}" | chpasswd
-
-    # Estructura de carpetas del usuario dentro de FTP_ROOT
-    # Al hacer login verá: general/, reprobados/ o recursadores/, nombre_usuario/
-    local USER_HOME="${FTP_ROOT}"
-
-    # Crear carpeta personal del usuario
-    local USER_DIR="${FTP_ROOT}/${usuario}"
-    mkdir -p "$USER_DIR"
-    chown "${usuario}:${grupo}" "$USER_DIR"
-    chmod 700 "$USER_DIR"
-
-    # Crear archivo de bienvenida
-    echo "Carpeta personal de ${usuario} — grupo ${grupo}" > "${USER_DIR}/bienvenida.txt"
-    chown "${usuario}:${grupo}" "${USER_DIR}/bienvenida.txt"
-
-    log_ok "Usuario '${usuario}' creado → grupo: ${grupo}"
-    log_ok "  Carpeta personal: ${USER_DIR}"
-    log_ok "  Acceso a: /general, /${grupo}, /${usuario}"
-}
-
-# ── Opción 3: Cambiar grupo de usuario ───────────────────────
+# ── Opcion 3: Cambiar grupo ───────────────────────────────────
 ftp_cambiar_grupo() {
     separador
-    echo -e "${BOLD}── Cambiar Grupo de Usuario ───────────────────────${NC}"
-
     echo -ne "   > Nombre de usuario: "; read -r usuario
     if ! id "$usuario" &>/dev/null; then
         log_error "Usuario '$usuario' no existe."; return
     fi
 
-    local grupo_actual
-    grupo_actual=$(id -gn "$usuario")
+    local grupo_actual; grupo_actual=$(id -gn "$usuario")
     log_info "Grupo actual: ${grupo_actual}"
 
     local nuevo_grupo
-    echo -e "   > Nuevo grupo: ${BOLD}[1]${NC} reprobados  ${BOLD}[2]${NC} recursadores"
-    echo -ne "   Selecciona [1-2]: "; read -r GSEL
-    case $GSEL in
-        1) nuevo_grupo="reprobados" ;;
-        2) nuevo_grupo="recursadores" ;;
-        *) log_error "Opción inválida."; return ;;
-    esac
+    while true; do
+        echo -ne "   > Nuevo grupo (reprobados / recursadores): "; read -r nuevo_grupo
+        nuevo_grupo=$(echo "$nuevo_grupo" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+        [[ "$nuevo_grupo" == "reprobados" || "$nuevo_grupo" == "recursadores" ]] && break
+        log_error "Grupo invalido."
+    done
 
-    if [[ "$grupo_actual" == "$nuevo_grupo" ]]; then
-        log_warn "El usuario ya pertenece a '$nuevo_grupo'."; return
-    fi
+    [[ "$grupo_actual" == "$nuevo_grupo" ]] && { log_warn "Ya pertenece a '$nuevo_grupo'."; return; }
 
-    # Cambiar grupo
     usermod -g "$nuevo_grupo" -G "$nuevo_grupo" "$usuario"
 
+    local USER_CHROOT="${FTP_ROOT}/${usuario}"
+
+    # Actualizar enlace de grupo en chroot
+    rm -f "${USER_CHROOT}/${grupo_actual}"
+    ln -sfn "${FTP_ROOT}/_${nuevo_grupo}" "${USER_CHROOT}/${nuevo_grupo}"
+
     # Mover carpeta personal al nuevo grupo
-    local USER_DIR="${FTP_ROOT}/${usuario}"
-    if [[ -d "$USER_DIR" ]]; then
-        chown -R "${usuario}:${nuevo_grupo}" "$USER_DIR"
-    fi
+    chown -R "${usuario}:${nuevo_grupo}" "${USER_CHROOT}/${usuario}" 2>/dev/null
 
     log_ok "Usuario '${usuario}' movido de '${grupo_actual}' a '${nuevo_grupo}'."
-    log_ok "Ahora tiene acceso a: /general, /${nuevo_grupo}, /${usuario}"
+    log_ok "Ahora ve: /general, /${nuevo_grupo}, /${usuario}"
 }
 
-# ── Opción 4: Listar usuarios y estructura ───────────────────
+# ── Opcion 4: Listar ─────────────────────────────────────────
 ftp_listar() {
     separador
     log_info "Usuarios FTP por grupo:"
     echo ""
-
     for grupo in "${GRUPOS[@]}"; do
         echo -e "${BOLD}  Grupo: ${grupo}${NC}"
-        local miembros
-        miembros=$(getent group "$grupo" | cut -d: -f4)
+        local miembros; miembros=$(getent group "$grupo" | cut -d: -f4)
         if [[ -z "$miembros" ]]; then
             echo "    (Sin usuarios)"
         else
             IFS=',' read -ra USERS <<< "$miembros"
-            for u in "${USERS[@]}"; do
-                echo "    → ${u}"
-            done
+            for u in "${USERS[@]}"; do echo "    -> ${u}"; done
         fi
         echo ""
     done
 
-    echo -e "${BOLD}  Estructura de directorios:${NC}"
-    if command -v tree &>/dev/null; then
-        tree "$FTP_ROOT" -L 2
-    else
-        ls -la "$FTP_ROOT"
-        for dir in "$FTP_ROOT"/*/; do
-            echo "  $(basename $dir)/:"
-            ls "  $dir" 2>/dev/null | sed 's/^/    /'
-        done
-    fi
+    log_info "Estructura de directorios:"
+    ls -la "$FTP_ROOT"
 }
 
-# ── Opción 5: Estado del servicio ────────────────────────────
+# ── Opcion 5: Estado ─────────────────────────────────────────
 ftp_estado() {
     separador
     log_info "Estado del servicio vsftpd:"
@@ -293,24 +273,21 @@ ftp_estado() {
     ss -tlnp | grep ":21" || log_warn "Puerto 21 no detectado."
 }
 
-# ── Opción 6: Dar de baja ────────────────────────────────────
+# ── Opcion 6: Baja ───────────────────────────────────────────
 ftp_baja() {
     separador
-    echo -ne "${YELLOW}¿Confirmas dar de baja el servidor FTP? (s/n): ${NC}"
-    read -r C
+    echo -ne "${YELLOW}Confirmas dar de baja el FTP? (s/n): ${NC}"; read -r C
     [[ ! "$C" =~ ^[Ss]$ ]] && { log_warn "Cancelado."; return; }
-
-    systemctl stop vsftpd
-    systemctl disable vsftpd &>/dev/null
+    systemctl stop vsftpd; systemctl disable vsftpd &>/dev/null
     log_ok "Servicio vsftpd detenido."
 
-    echo -ne "¿Eliminar usuarios FTP creados? (s/n): "; read -r DEL
+    echo -ne "Eliminar usuarios FTP? (s/n): "; read -r DEL
     if [[ "$DEL" =~ ^[Ss]$ ]]; then
         for grupo in "${GRUPOS[@]}"; do
-            local miembros
-            miembros=$(getent group "$grupo" | cut -d: -f4)
+            local miembros; miembros=$(getent group "$grupo" | cut -d: -f4)
             IFS=',' read -ra USERS <<< "$miembros"
             for u in "${USERS[@]}"; do
+                [[ -z "$u" ]] && continue
                 userdel "$u" 2>/dev/null
                 rm -rf "${FTP_ROOT}/${u}"
                 log_ok "Usuario '$u' eliminado."
@@ -318,11 +295,11 @@ ftp_baja() {
         done
     fi
 
-    echo -ne "¿Desinstalar vsftpd? (s/n): "; read -r UNI
+    echo -ne "Desinstalar vsftpd? (s/n): "; read -r UNI
     [[ "$UNI" =~ ^[Ss]$ ]] && zypper --non-interactive remove vsftpd &>/dev/null && log_ok "vsftpd desinstalado."
 }
 
-# ── Menú FTP ──────────────────────────────────────────────────
+# ── Menu FTP ─────────────────────────────────────────────────
 menu_ftp() {
     while true; do
         clear
@@ -331,15 +308,15 @@ menu_ftp() {
         echo "║   Administrador FTP - vsftpd - OpenSUSE      ║"
         echo "╚══════════════════════════════════════════════╝"
         echo -e "${NC}"
-        echo -e "  ${BOLD}1)${NC} Instalación Idempotente"
-        echo -e "  ${BOLD}2)${NC} Gestión de Usuarios y Grupos"
+        echo -e "  ${BOLD}1)${NC} Instalacion Idempotente"
+        echo -e "  ${BOLD}2)${NC} Gestion de Usuarios y Grupos"
         echo -e "  ${BOLD}3)${NC} Cambiar Grupo de Usuario"
         echo -e "  ${BOLD}4)${NC} Listar Usuarios y Estructura"
         echo -e "  ${BOLD}5)${NC} Estado del Servicio"
         echo -e "  ${BOLD}6)${NC} Dar de Baja FTP"
         echo -e "  ${BOLD}0)${NC} Salir"
         echo ""
-        echo -ne "Opción [0-6]: "; read -r OPT
+        echo -ne "Opcion [0-6]: "; read -r OPT
         case $OPT in
             1) ftp_instalar ;;
             2) ftp_gestionar_usuarios ;;
@@ -348,7 +325,7 @@ menu_ftp() {
             5) ftp_estado ;;
             6) ftp_baja ;;
             0) echo -e "\n${GREEN}Saliendo...${NC}\n"; exit 0 ;;
-            *) log_warn "Opción inválida." ;;
+            *) log_warn "Opcion invalida." ;;
         esac
         pausar
     done
