@@ -384,7 +384,6 @@ while true; do
     echo -e "${CYAN}${BOLD}"
     echo "╔══════════════════════════════════╗"
     echo "║      GESTION FTP - vsftpd        ║"
-    echo "║   Administracion de Sistemas     ║"
     echo "╠══════════════════════════════════╣"
     echo "║  1) Instalar y Configurar        ║"
     echo "║  2) Crear Usuarios               ║"
