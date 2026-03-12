@@ -72,7 +72,19 @@ instalar_configurar() {
     chown root:recursadores "$FTP_ROOT/recursadores"
     chmod 2770 "$FTP_ROOT/recursadores"
 
+    # Carpeta raiz para anonimo (ve /general como carpeta, no como raiz)
+    mkdir -p "$FTP_ROOT/anonimo/general"
+    chown root:root "$FTP_ROOT/anonimo"
+    chmod 755 "$FTP_ROOT/anonimo"
+
+    # Bind mount: anonimo/general apunta a la misma carpeta real
+    mountpoint -q "$FTP_ROOT/anonimo/general" || \
+        mount --bind "$FTP_ROOT/general" "$FTP_ROOT/anonimo/general"
+    grep -q "$FTP_ROOT/anonimo/general" /etc/fstab || \
+        echo "$FTP_ROOT/general $FTP_ROOT/anonimo/general none bind 0 0" >> /etc/fstab
+
     log_ok "Carpetas maestras creadas en $FTP_ROOT"
+    log_ok "Anonimo vera solo: /general (mismo contenido que usuarios autenticados)"
 
     # Shell de nologin permitida
     grep -q "^/sbin/nologin$" /etc/shells || echo "/sbin/nologin" >> /etc/shells
@@ -85,9 +97,9 @@ instalar_configurar() {
 listen=YES
 listen_ipv6=NO
 
-# --- Acceso anonimo (solo lectura a /general) ---
+# --- Acceso anonimo (ve carpeta /general) ---
 anonymous_enable=YES
-anon_root=$FTP_ROOT/general
+anon_root=$FTP_ROOT/anonimo
 no_anon_password=YES
 anon_upload_enable=NO
 anon_mkdir_write_enable=NO
@@ -384,6 +396,7 @@ while true; do
     echo -e "${CYAN}${BOLD}"
     echo "╔══════════════════════════════════╗"
     echo "║      GESTION FTP - vsftpd        ║"
+    echo "║   Administracion de Sistemas     ║"
     echo "╠══════════════════════════════════╣"
     echo "║  1) Instalar y Configurar        ║"
     echo "║  2) Crear Usuarios               ║"
