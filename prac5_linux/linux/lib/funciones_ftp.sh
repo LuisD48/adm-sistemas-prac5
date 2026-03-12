@@ -144,13 +144,23 @@ ftp_crear_usuario() {
     chown root:root "${USER_CHROOT}"
     chmod 755 "${USER_CHROOT}"
 
-    # Enlazar carpeta general
-    [[ ! -e "${USER_CHROOT}/general" ]] && \
-        ln -sfn "${FTP_GENERAL}" "${USER_CHROOT}/general"
+    # Crear carpetas y aplicar bind mount (vsftpd no sigue symlinks en chroot)
+    mkdir -p "${USER_CHROOT}/general"
+    mkdir -p "${USER_CHROOT}/${grupo}"
 
-    # Enlazar carpeta de grupo
-    [[ ! -e "${USER_CHROOT}/${grupo}" ]] && \
-        ln -sfn "${FTP_ROOT}/_${grupo}" "${USER_CHROOT}/${grupo}"
+    # Montar bind si no esta ya montado
+    if ! mountpoint -q "${USER_CHROOT}/general"; then
+        mount --bind "${FTP_GENERAL}" "${USER_CHROOT}/general"
+    fi
+    if ! mountpoint -q "${USER_CHROOT}/${grupo}"; then
+        mount --bind "${FTP_ROOT}/_${grupo}" "${USER_CHROOT}/${grupo}"
+    fi
+
+    # Hacer los mounts persistentes en fstab
+    grep -q "${USER_CHROOT}/general" /etc/fstab || \
+        echo "${FTP_GENERAL} ${USER_CHROOT}/general none bind 0 0" >> /etc/fstab
+    grep -q "${USER_CHROOT}/${grupo}" /etc/fstab || \
+        echo "${FTP_ROOT}/_${grupo} ${USER_CHROOT}/${grupo} none bind 0 0" >> /etc/fstab
 
     # Carpeta personal
     chown "${usuario}:${grupo}" "${USER_CHROOT}/${usuario}"
@@ -231,9 +241,20 @@ ftp_cambiar_grupo() {
 
     local USER_CHROOT="${FTP_ROOT}/${usuario}"
 
-    # Actualizar enlace de grupo en chroot
-    rm -f "${USER_CHROOT}/${grupo_actual}"
-    ln -sfn "${FTP_ROOT}/_${nuevo_grupo}" "${USER_CHROOT}/${nuevo_grupo}"
+    # Desmontar carpeta de grupo anterior
+    if mountpoint -q "${USER_CHROOT}/${grupo_actual}"; then
+        umount "${USER_CHROOT}/${grupo_actual}"
+    fi
+    rm -rf "${USER_CHROOT}/${grupo_actual}"
+
+    # Montar nueva carpeta de grupo
+    mkdir -p "${USER_CHROOT}/${nuevo_grupo}"
+    mount --bind "${FTP_ROOT}/_${nuevo_grupo}" "${USER_CHROOT}/${nuevo_grupo}"
+
+    # Actualizar fstab
+    sed -i "\|${USER_CHROOT}/${grupo_actual}|d" /etc/fstab
+    grep -q "${USER_CHROOT}/${nuevo_grupo}" /etc/fstab || \
+        echo "${FTP_ROOT}/_${nuevo_grupo} ${USER_CHROOT}/${nuevo_grupo} none bind 0 0" >> /etc/fstab
 
     # Mover carpeta personal al nuevo grupo
     chown -R "${usuario}:${nuevo_grupo}" "${USER_CHROOT}/${usuario}" 2>/dev/null
